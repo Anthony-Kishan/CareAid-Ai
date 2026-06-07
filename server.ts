@@ -10,8 +10,32 @@ import { classifySymptoms, scrubMedicines, buildSafetyPromptHint } from "./src/l
 dotenv.config();
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || "" });
-const geminiKey = process.env.GEMINI_API_KEY || "";
-const gemini = geminiKey ? new GoogleGenAI({ apiKey: geminiKey }) : null;
+
+// Gemini multi-key rotation — the free tier caps each key at ~20 prescription scans/day, so
+// rotating through several keys multiplies headroom for hackathon judging. Accepts EITHER:
+//   GEMINI_API_KEY          (single key, legacy)
+//   GEMINI_API_KEYS         (comma-separated list of keys)
+//   GEMINI_API_KEY_1, _2…   (numbered keys)
+// All sources are merged, deduped, blank-stripped. Empty list = no Gemini.
+function collectGeminiKeys(): string[] {
+  const keys: string[] = [];
+  if (process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY);
+  if (process.env.GEMINI_API_KEYS) {
+    for (const k of process.env.GEMINI_API_KEYS.split(",")) keys.push(k.trim());
+  }
+  for (let i = 1; i <= 10; i++) {
+    const v = process.env[`GEMINI_API_KEY_${i}`];
+    if (v) keys.push(v);
+  }
+  return Array.from(new Set(keys.map((k) => k.trim()).filter(Boolean)));
+}
+const geminiKeys = collectGeminiKeys();
+const geminiClients = geminiKeys.map((apiKey) => new GoogleGenAI({ apiKey }));
+console.log(`✅ Gemini configured with ${geminiClients.length} key${geminiClients.length === 1 ? "" : "s"}`);
+const isGeminiQuotaError = (e: any): boolean => {
+  const msg = String(e?.message || e?.status || e || "").toLowerCase();
+  return msg.includes("429") || msg.includes("quota") || msg.includes("rate") || msg.includes("resource_exhausted") || msg.includes("permission");
+};
 
 const TRIAGE_SYSTEM = `You are CareAid AI (স্বাস্থ্য সহায়ক), a compassionate AI health assistant for rural Bangladesh.
 
@@ -211,10 +235,13 @@ Rules:
     const { image } = req.body || {};
     if (!image) return res.status(400).json({ error: "Image required" });
 
-    // 1) Gemini path (preferred)
-    if (gemini) {
+    // 1) Gemini path (preferred) — try each configured key in turn. Quota / 429 / permission
+    // errors on one key transparently roll over to the next. Other errors bail to the Groq
+    // fallback so we don't loop on a content/parsing failure.
+    for (let i = 0; i < geminiClients.length; i++) {
+      const client = geminiClients[i];
       try {
-        const result = await gemini.models.generateContent({
+        const result = await client.models.generateContent({
           model: "gemini-2.5-flash",
           contents: [{
             role: "user",
@@ -231,9 +258,12 @@ Rules:
         const text = result.text || "{}";
         const parsed = JSON.parse(text);
         parsed.provider = "gemini";
+        parsed.gemini_key_index = i + 1;
         return res.json(parsed);
       } catch (e: any) {
-        console.warn("Gemini scan failed, falling back to Groq:", e?.message || e);
+        const isQuota = isGeminiQuotaError(e);
+        console.warn(`Gemini key #${i + 1} ${isQuota ? "quota/rate-limited" : "failed"}:`, e?.message || e);
+        if (!isQuota) break; // non-quota error: stop rotating, fall through to Groq
       }
     }
 

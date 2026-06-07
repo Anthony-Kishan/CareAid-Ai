@@ -15,6 +15,7 @@ import {
   saveScannedPrescription,
   saveSubmittedReview,
   upsertExternalDoctor,
+  syntheticDoctorId,
 } from "../lib/store.ts";
 import type { ExtractedPrescription, ExtractedMedicine, LegibilityRecord } from "../lib/types.ts";
 import { speak, stop as ttsStop, isTtsSupported, warmupVoices } from "../lib/tts.ts";
@@ -95,17 +96,20 @@ export function ScannerPage({ onLoginRequired, user }: { onLoginRequired: () => 
     const name = String(data?.doctor?.name || "").trim();
     const hospital = String(data?.doctor?.hospital || "").trim();
     if (name) {
-      const idLike = bmdcRaw
-        ? bmdcRaw
-        : `nb_${name.toLowerCase().replace(/[^a-z0-9ঀ-৿]+/gi, "-").slice(0, 40)}${hospital ? "_" + hospital.toLowerCase().replace(/[^a-z0-9ঀ-৿]+/gi, "-").slice(0, 20) : ""}`;
-      upsertExternalDoctor({
+      // For prescriptions WITHOUT a BMDC, build a canonical synthetic ID from the doctor's name
+      // alone (not name+hospital — that fragments the same doctor across hospitals/OCR runs).
+      // upsertExternalDoctor will additionally fuzzy-match against existing synthetic entries to
+      // dedup OCR variations of the same name. We then use the RETURNED doctor's bmdc for the
+      // legibility score so it always aggregates onto the canonical entry, never a duplicate.
+      const idLike = bmdcRaw || syntheticDoctorId(name);
+      const upserted = upsertExternalDoctor({
         bmdc: idLike,
         name,
         hospital: hospital || undefined,
         specialty: data?.doctor?.specialization || undefined,
       });
       if (typeof data?.legibility_score === "number") {
-        addLegibilityScore(idLike, Number(data.legibility_score), name, data.legibility_reason || undefined);
+        addLegibilityScore(upserted.bmdc, Number(data.legibility_score), upserted.name, data.legibility_reason || undefined);
       }
     }
 

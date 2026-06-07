@@ -46,13 +46,15 @@ function riskLevelOf(score: number): RiskLevel {
   return "low";
 }
 
-// A candidate condition the patient can confirm. We never silently commit to the top BM25 match
-// any more — instead we surface the top few and let the patient pick the closest one. The patient
-// is the authority on their own symptoms; this turns a brittle keyword guess into a confirmation.
+// A candidate condition the patient can confirm. Rural users can't pick from disease names
+// ("Suspected meningitis" means nothing to them) — so we expose a SYMPTOM-friendly hint derived
+// from the entry's summary instead. They pick the description that matches how they feel, not
+// the medical label. The id/severity stay internal for the diagnostic engine.
 export interface DiagnosticCandidate {
   id: string;
-  title_en: string;
-  title_bn: string;
+  // Short symptom-friendly description (derived from summary) — what the patient sees on the button.
+  hint_en: string;
+  hint_bn: string;
   severity: "mild" | "urgent" | "critical";
   score: number;
 }
@@ -65,19 +67,67 @@ export interface CandidateResult {
   safetyVerdict: "critical" | "urgent" | "routine";
 }
 
+// Pull the FIRST short clause of the summary so the button shows a symptom-pattern, not the
+// disease name. Caps at ~70 chars to keep buttons tappable on mobile.
+function symptomHint(text: string, max = 70): string {
+  if (!text) return "";
+  const firstSentence = text.split(/(?<=[.।])\s+/)[0] || text;
+  const trimmed = firstSentence.replace(/\s+/g, " ").trim();
+  return trimmed.length > max ? trimmed.slice(0, max - 1) + "…" : trimmed;
+}
+
+// Severity-ordering: rural-user safe default. When several conditions match the same keywords
+// (e.g. "fever + headache" hits both mild-fever AND meningitis), the BENIGN/common one should
+// appear FIRST so the patient doesn't see "suspected meningitis" as the headline guess.
+const SEVERITY_ORDER: Record<"mild" | "urgent" | "critical", number> = { mild: 0, urgent: 1, critical: 2 };
+
+// Common-fallback ids that should appear in the candidate list when their tags overlap the
+// query, even if their BM25 score isn't top-3. Prevents the "fever+headache → meningitis"
+// failure mode where a critical condition crowds out the obvious mild explanation.
+const COMMON_FALLBACK_IDS = ["fever-adult-mild", "headache-mild", "cold-runny-nose", "cough-persistent", "diarrhea-adult", "sore-throat", "stomach-pain-severe"];
+
 // Fast, geolocation-free lookup of the top candidate conditions for a symptom description.
 export async function getDiagnosticCandidates(symptoms: string, _lang: "en" | "bn"): Promise<CandidateResult> {
   const safety = classifySymptoms(symptoms);
-  const matches = await retrieveWithScore(symptoms, 3);
-  const candidates: DiagnosticCandidate[] = matches.map((m) => ({
-    id: m.entry.id,
-    title_en: m.entry.title.en,
-    title_bn: m.entry.title.bn,
-    severity: m.entry.severity,
-    score: Math.round(m.score * 100) / 100,
+  const matches = await retrieveWithScore(symptoms, 5);
+
+  // De-duplicate by id, keep best score per id.
+  const byId = new Map<string, { entry: typeof matches[0]["entry"]; score: number }>();
+  for (const m of matches) {
+    const ex = byId.get(m.entry.id);
+    if (!ex || m.score > ex.score) byId.set(m.entry.id, { entry: m.entry, score: m.score });
+  }
+
+  // Try to also include a generic mild fallback if its tags overlap any query token (so we never
+  // show ONLY critical conditions when the patient mentioned a common symptom).
+  const queryLower = symptoms.toLowerCase();
+  for (const id of COMMON_FALLBACK_IDS) {
+    if (byId.has(id)) continue;
+    // Pull the entry from the larger match set or fetch by id-as-query.
+    const extra = await retrieveWithScore(id.replace(/-/g, " "), 5);
+    const found = extra.find((m) => m.entry.id === id);
+    if (!found) continue;
+    const overlap = [...found.entry.tags_en, ...found.entry.tags_bn].some((tag) =>
+      queryLower.includes(tag.toLowerCase()) || symptoms.includes(tag)
+    );
+    if (overlap) byId.set(id, { entry: found.entry, score: found.score * 0.6 }); // light penalty vs direct matches
+  }
+
+  // Convert + sort: severity ASC (mild first), then BM25 score DESC.
+  const arr = Array.from(byId.values()).map(({ entry, score }) => ({
+    id: entry.id,
+    hint_en: symptomHint(entry.summary.en),
+    hint_bn: symptomHint(entry.summary.bn),
+    severity: entry.severity,
+    score: Math.round(score * 100) / 100,
   }));
+  arr.sort((a, b) => {
+    const s = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
+    return s !== 0 ? s : b.score - a.score;
+  });
+
   return {
-    candidates,
+    candidates: arr.slice(0, 4),
     forceImmediate: safety.verdict === "critical",
     safetyVerdict: safety.verdict,
   };
@@ -93,7 +143,7 @@ interface RunOpts {
 }
 
 export async function runDiagnostic(opts: RunOpts): Promise<DiagnosticResult> {
-  const { symptoms, profile, lang, forcedEntryId } = opts;
+  const { symptoms, profile, forcedEntryId } = opts;
   const regional = await loadRegional();
   const safety = classifySymptoms(symptoms);
 

@@ -107,16 +107,23 @@ export function DiagnosticPanel({ symptoms, onSetProfile }: DiagnosticPanelProps
               </div>
               <div>
                 <p className="text-sm font-bold text-white">
-                  {lang === "bn" ? "কোনটি আপনার সমস্যার সবচেয়ে কাছাকাছি?" : "Which is closest to your problem?"}
+                  {lang === "bn"
+                    ? "আপনার সমস্যা কোনটির সাথে বেশি মেলে?"
+                    : "Which one feels closest to what you have?"}
                 </p>
                 <p className="text-[10px] text-emerald-300/80">
-                  {lang === "bn" ? "সঠিক পরামর্শের জন্য নিশ্চিত করুন" : "Confirm so we advise you correctly"}
+                  {lang === "bn"
+                    ? "রোগের নাম নয় — শুধু লক্ষণ মিলিয়ে দেখুন"
+                    : "Not disease names — just match the symptoms"}
                 </p>
               </div>
             </header>
 
             <div className="space-y-2 mt-3">
               {candidates.map((c) => {
+                // Subtle severity tinting so the patient gets a colour cue, but no scary disease
+                // label. Mild = calm emerald, urgent = amber, critical = red. Order is mild-first
+                // by default so the most common explanation appears at the top.
                 const sevTone =
                   c.severity === "critical" ? "border-red-400/40 bg-red-500/10"
                   : c.severity === "urgent" ? "border-amber-400/40 bg-amber-500/10"
@@ -125,10 +132,10 @@ export function DiagnosticPanel({ symptoms, onSetProfile }: DiagnosticPanelProps
                   <button
                     key={c.id}
                     onClick={() => confirmCandidate(c.id)}
-                    className={`w-full text-left border ${sevTone} rounded-xl px-4 py-3 flex items-center justify-between gap-3 hover:bg-white/10 transition-colors`}
+                    className={`w-full text-left border ${sevTone} rounded-xl px-4 py-3 flex items-start justify-between gap-3 hover:bg-white/10 transition-colors`}
                   >
-                    <span className="text-sm font-medium text-white">{lang === "bn" ? c.title_bn : c.title_en}</span>
-                    <ChevronRight size={16} className="text-white/50 shrink-0" />
+                    <span className="text-xs text-white leading-relaxed">{lang === "bn" ? c.hint_bn : c.hint_en}</span>
+                    <ChevronRight size={16} className="text-white/50 shrink-0 mt-0.5" />
                   </button>
                 );
               })}
