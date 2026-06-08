@@ -12,7 +12,7 @@ import { PatientProfileSheet } from "../components/PatientProfileSheet.tsx";
 import { usePatientProfile, summariseProfile } from "../lib/profile.ts";
 import { listTriageMessages, saveTriageMessages, clearTriageMessages, KEYS, subscribe } from "../lib/store.ts";
 import type { TriageMessage } from "../lib/types.ts";
-import { startManualRecording, isVoiceReady, type ManualRecorder } from "../lib/voiceEngine.ts";
+import { startManualRecording, getVoiceState, prefetch as prefetchVoice, type ManualRecorder } from "../lib/voiceEngine.ts";
 import { speak, stop as ttsStop, warmupVoices } from "../lib/tts.ts";
 
 interface Message { id?: string; timestamp?: string; role: "user" | "assistant"; content: string; safety?: { verdict: string; matched: string[]; scrubbedLines?: number }; source?: ChatSource; diagnosticForSymptoms?: string; }
@@ -202,7 +202,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
   // Hybrid voice input. Online + Web Speech API available → use it (free, fast, no model). Offline
   // OR if the user has downloaded the Whisper-tiny model → use the on-device Whisper pipeline so
   // the mic button works without internet. Both modes are tap-to-start, tap-again-to-stop.
-  const [voiceMode, setVoiceMode] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [voiceMode, setVoiceMode] = useState<"idle" | "warming" | "recording" | "transcribing">("idle");
   const manualRecRef = useRef<ManualRecorder | null>(null);
 
   const startWebSpeech = async (): Promise<void> => {
@@ -219,8 +219,8 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      // Browser doesn't have Web Speech — fall through to offline Whisper if available.
-      if (isVoiceReady()) return startWhisper();
+      // Browser doesn't have Web Speech — fall through to offline Whisper (warm if cold).
+      if (await tryStartWhisperWithWarmup()) return;
       alert(lang === "bn"
         ? "আপনার ব্রাউজার ভয়েস সাপোর্ট করে না। সেটিংসে গিয়ে অফলাইন AI ডাউনলোড করুন।"
         : "Voice not supported in this browser. Download Offline AI in Settings to enable on-device voice.");
@@ -236,11 +236,13 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
       if (e.error === "not-allowed") {
         alert(lang === "bn" ? "মাইক্রোফোন ব্লক করা আছে।" : "Microphone blocked.");
       } else if (e.error === "network" || e.error === "service-not-allowed") {
-        // Web Speech fell over (often happens when offline). Fall back to Whisper if loaded.
-        if (isVoiceReady()) { void startWhisper(); }
-        else alert(lang === "bn"
-          ? "ভয়েস সার্ভিস উপলব্ধ নেই। সেটিংসে গিয়ে অফলাইন AI ডাউনলোড করুন।"
-          : "Voice service unavailable. Download Offline AI in Settings for offline voice.");
+        // Web Speech fell over (often happens when offline). Fall back to Whisper — warm if cold.
+        void (async () => {
+          if (await tryStartWhisperWithWarmup()) return;
+          alert(lang === "bn"
+            ? "ভয়েস সার্ভিস উপলব্ধ নেই। সেটিংসে গিয়ে অফলাইন AI ডাউনলোড করুন।"
+            : "Voice service unavailable. Download Offline AI in Settings for offline voice.");
+        })();
       }
       setIsRecording(false);
     };
@@ -280,6 +282,30 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     }
   };
 
+  // Whisper-with-warmup. If the model is downloaded but cold (page reload, autoload pending),
+  // warm it on-demand and then start recording — instead of falsely telling the user it isn't
+  // downloaded. Returns true if we kicked off (or completed) recording, false if not downloaded.
+  const tryStartWhisperWithWarmup = async (): Promise<boolean> => {
+    const vs = getVoiceState();
+    if (vs.status === "ready") { await startWhisper(); return true; }
+    if (vs.cached || vs.status === "loading") {
+      setVoiceMode("warming");
+      try {
+        await prefetchVoice(); // idempotent — no-op if already loading/ready
+        await startWhisper();
+        return true;
+      } catch (e) {
+        console.error("[voice] warm-up failed", e);
+        setVoiceMode("idle");
+        alert(lang === "bn"
+          ? "অফলাইন ভয়েস মডেল লোড করতে সমস্যা হয়েছে। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।"
+          : "Could not load the offline voice model. Refresh and try again.");
+        return true; // user was notified; don't fall through to the "go download" alert
+      }
+    }
+    return false;
+  };
+
   const toggleRecording = async () => {
     if (isRecording) {
       // If we're using Whisper, stop & transcribe. Otherwise stop Web Speech recognition.
@@ -292,20 +318,19 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     // worked before). Whisper is reserved for OFFLINE use, so downloading the offline AI never
     // makes online voice slower/flakier. Order:
     //   • online + browser has Web Speech  → Web Speech
-    //   • offline (or no Web Speech) + Whisper loaded → on-device Whisper
-    //   • offline + Whisper not loaded → prompt to download
+    //   • offline (or no Web Speech) + Whisper downloaded → on-device Whisper (warm if cold)
+    //   • offline + Whisper truly not downloaded → prompt to download
     const online = typeof navigator !== "undefined" ? navigator.onLine : true;
     const hasWebSpeech = !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
     if (online && hasWebSpeech) {
       await startWebSpeech();
-    } else if (isVoiceReady()) {
-      await startWhisper();
-    } else {
-      alert(lang === "bn"
-        ? "অফলাইন ভয়েসের জন্য সেটিংসে গিয়ে অফলাইন AI ডাউনলোড করুন (Whisper ভয়েস মডেল)।"
-        : "For offline voice input, download the Offline AI in Settings (includes the Whisper voice model).");
+      return;
     }
+    if (await tryStartWhisperWithWarmup()) return;
+    alert(lang === "bn"
+      ? "অফলাইন ভয়েসের জন্য সেটিংসে গিয়ে অফলাইন AI ডাউনলোড করুন (Whisper ভয়েস মডেল)।"
+      : "For offline voice input, download the Offline AI in Settings (includes the Whisper voice model).");
   };
 
   return (
@@ -455,7 +480,12 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
             </button>
           </div>
         </div>
-        {isRecording && voiceMode !== "transcribing" && (
+        {voiceMode === "warming" && (
+          <p className="text-center text-xs text-emerald-700 font-medium mt-2 animate-pulse">
+            {lang === "bn" ? "অফলাইন ভয়েস মডেল প্রস্তুত হচ্ছে... একটু সময় লাগতে পারে" : "Preparing offline voice model... this may take a moment"}
+          </p>
+        )}
+        {isRecording && voiceMode !== "transcribing" && voiceMode !== "warming" && (
           <p className="text-center text-xs text-red-500 font-medium mt-2 animate-pulse">
             {lang === "bn" ? "শুনছি... কথা বলুন · থামাতে আবার ট্যাপ করুন" : "Listening... speak now · tap again to stop"}
           </p>
