@@ -399,10 +399,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
               {/* Multi-factor diagnostic panel — runs alongside the chat reply. */}
               {msg.role === "assistant" && msg.diagnosticForSymptoms && (
                 <div className="w-full lg:max-w-[480px] mt-1">
-                  <DiagnosticPanel
-                    symptoms={msg.diagnosticForSymptoms}
-                    onSetProfile={() => setShowProfile(true)}
-                  />
+                  <DiagnosticPanel symptoms={msg.diagnosticForSymptoms} />
                 </div>
               )}
             </motion.div>

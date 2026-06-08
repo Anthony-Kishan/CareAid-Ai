@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, MapPin, Loader2, ShieldAlert, Phone } from "lucide-react";
+import { AlertTriangle, MapPin, Loader2, ShieldAlert, Phone } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useLanguage } from "../lib/LanguageContext.tsx";
 import { runDiagnostic, getDiagnosticCandidates } from "../lib/diagnostic.ts";
@@ -8,7 +8,6 @@ import type { DiagnosticResult } from "../lib/types.ts";
 
 interface DiagnosticPanelProps {
   symptoms: string;
-  onSetProfile?: () => void;
 }
 
 // The "analyzing → verdict" panel. Renders alongside the chat reply. Fully offline.
@@ -18,7 +17,7 @@ interface DiagnosticPanelProps {
 // No confirmation step — rural users often can't read disease names, so we don't ask them to
 // pick. The diagnostic engine uses the top candidate's id and weights the verdict with the
 // patient profile + regional disease trend + safety classifier.
-export function DiagnosticPanel({ symptoms, onSetProfile }: DiagnosticPanelProps) {
+export function DiagnosticPanel({ symptoms }: DiagnosticPanelProps) {
   const { t, lang } = useLanguage();
   const profile = usePatientProfile();
   const [phase, setPhase] = useState<"analyzing" | "ready" | "error">("analyzing");
@@ -63,27 +62,12 @@ export function DiagnosticPanel({ symptoms, onSetProfile }: DiagnosticPanelProps
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="bg-emerald-950 text-white rounded-3xl p-5 shadow-xl"
+            className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 flex items-center gap-3"
           >
-            <header className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-emerald-800/60 rounded-xl flex items-center justify-center">
-                <Activity size={20} className="text-emerald-300" />
-              </div>
-              <div>
-                <p className="text-sm font-bold text-white">{t("diag.title")}</p>
-                <p className="text-[10px] text-emerald-300/80">{t("diag.subtitle")}</p>
-              </div>
-            </header>
-
-            <div className="space-y-2">
-              <SkeletonRow label={t("diag.row.profile")} />
-              <SkeletonRow label={t("diag.row.regional")} />
-              <SkeletonRow label={t("diag.row.who")} />
-            </div>
-
-            <div className="mt-4 flex items-center justify-center gap-2 text-[10px] font-bold text-emerald-300 uppercase tracking-widest">
-              <Loader2 size={12} className="animate-spin" /> {t("diag.running")}
-            </div>
+            <Loader2 size={16} className="animate-spin text-emerald-700 shrink-0" />
+            <p className="text-xs font-bold text-emerald-800 uppercase tracking-widest">
+              {t("diag.running")}
+            </p>
           </motion.div>
         )}
 
@@ -92,56 +76,11 @@ export function DiagnosticPanel({ symptoms, onSetProfile }: DiagnosticPanelProps
             key="ready"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="space-y-3"
           >
-            {/* Factor breakdown card (dark) */}
-            <div className="bg-emerald-950 text-white rounded-3xl p-5 shadow-xl">
-              <header className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 bg-emerald-800/60 rounded-xl flex items-center justify-center">
-                  <Activity size={20} className="text-emerald-300" />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-white">{t("diag.title")}</p>
-                  <p className="text-[10px] text-emerald-300/80">{t("diag.subtitle")}</p>
-                </div>
-              </header>
-
-              <div className="space-y-2">
-                {result.factors.map((f, i) => (
-                  <div key={i} className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 flex items-start gap-3">
-                    <p className="text-[11px] text-emerald-300/80 font-medium shrink-0 min-w-[110px]">
-                      {lang === "bn" ? f.label_bn : f.label_en}
-                    </p>
-                    <p className="text-xs text-white/90 text-right ml-auto">
-                      {lang === "bn" ? f.value_bn : f.value_en}
-                    </p>
-                  </div>
-                ))}
-                {result.factors.length === 0 && (
-                  <button
-                    onClick={onSetProfile}
-                    className="w-full bg-amber-500/15 border border-amber-400/30 rounded-xl px-3 py-2 text-xs text-amber-200 text-left hover:bg-amber-500/25"
-                  >
-                    {t("diag.noProfile")} →
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Risk verdict (red / amber / emerald) */}
             <RiskVerdictCard result={result} t={t} lang={lang as "en" | "bn"} />
           </motion.div>
         )}
       </AnimatePresence>
-    </div>
-  );
-}
-
-function SkeletonRow({ label }: { label: string }) {
-  return (
-    <div className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 flex items-center gap-3">
-      <p className="text-[11px] text-emerald-300/80 font-medium shrink-0 min-w-[110px]">{label}</p>
-      <div className="ml-auto h-3 w-24 rounded bg-emerald-700/40 animate-pulse" />
     </div>
   );
 }
@@ -180,8 +119,7 @@ function RiskVerdictCard({
     <div className={`rounded-3xl border ${tone.border} ${tone.bg} p-5 shadow-sm`}>
       <header className="flex items-start justify-between gap-3 mb-3">
         <div>
-          <p className={`text-[10px] font-bold uppercase tracking-widest ${tone.muted}`}>{t("diag.verdict")}</p>
-          <p className={`text-3xl font-black ${tone.text} mt-1`}>
+          <p className={`text-3xl font-black ${tone.text}`}>
             {result.riskScore}% <span className="text-lg font-bold">— {riskLabel}</span>
           </p>
         </div>
