@@ -284,26 +284,34 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
 
   // Whisper-with-warmup. If the model is downloaded but cold (page reload, autoload pending),
   // warm it on-demand and then start recording — instead of falsely telling the user it isn't
-  // downloaded. Returns true if we kicked off (or completed) recording, false if not downloaded.
+  // downloaded. The `cached` flag from localStorage can be missing in real-world scenarios
+  // (storage eviction, mid-download crash, multi-tab race), so when the user is OFFLINE we
+  // always attempt a warm-up: if the model is in transformers.js' Cache Storage it loads from
+  // disk; if it isn't there the network fetch fails fast (no accidental 75 MB download because
+  // we're offline). We only gate the warm-up on `cached` when ONLINE, to avoid auto-starting
+  // a fresh download from a single mic tap.
+  // Returns true if we kicked off (or completed) recording / notified the user; false if the
+  // caller should show the "go download" alert.
   const tryStartWhisperWithWarmup = async (): Promise<boolean> => {
     const vs = getVoiceState();
     if (vs.status === "ready") { await startWhisper(); return true; }
-    if (vs.cached || vs.status === "loading") {
-      setVoiceMode("warming");
-      try {
-        await prefetchVoice(); // idempotent — no-op if already loading/ready
-        await startWhisper();
-        return true;
-      } catch (e) {
-        console.error("[voice] warm-up failed", e);
-        setVoiceMode("idle");
-        alert(lang === "bn"
-          ? "অফলাইন ভয়েস মডেল লোড করতে সমস্যা হয়েছে। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।"
-          : "Could not load the offline voice model. Refresh and try again.");
-        return true; // user was notified; don't fall through to the "go download" alert
-      }
+    const offline = typeof navigator !== "undefined" && !navigator.onLine;
+    const shouldAttempt = offline || vs.cached || vs.status === "loading";
+    if (!shouldAttempt) return false;
+    setVoiceMode("warming");
+    try {
+      await prefetchVoice(); // idempotent — no-op if already loading/ready
+      await startWhisper();
+      return true;
+    } catch (e) {
+      console.error("[voice] warm-up failed", e);
+      setVoiceMode("idle");
+      // Honest signal — the weights aren't actually in the browser cache.
+      alert(lang === "bn"
+        ? "অফলাইন ভয়েস মডেল ব্রাউজার ক্যাশে নেই। অনুগ্রহ করে ইন্টারনেট সংযোগ করে সেটিংস → ‘Voice + Scanner only’ থেকে আবার ডাউনলোড করুন।"
+        : "The offline voice model isn't in your browser cache. Reconnect to the internet and re-download it from Settings → 'Voice + Scanner only'.");
+      return true; // user notified; don't show the duplicate "go download" alert
     }
-    return false;
   };
 
   const toggleRecording = async () => {
