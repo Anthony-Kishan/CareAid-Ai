@@ -514,16 +514,103 @@ export function listExternalDoctors(): ExternalDoctor[] {
   return rawGet<ExternalDoctor[]>(EXTERNAL_DOCTORS_KEY, []);
 }
 
+// Strip common doctor-name titles, lowercase ASCII, collapse spaces, drop punctuation. Used as
+// the comparison key when a prescription has NO BMDC registration number — so OCR variations of
+// the same doctor's name don't fragment into many duplicate "external doctor" profiles.
+export function canonicalizeDoctorName(name: string): string {
+  if (!name) return "";
+  let n = name.trim();
+  // Strip leading titles (English + Bangla variants). Run repeatedly so "Prof. Dr. Mahmud" collapses fully.
+  const titles = [
+    /^dr\.?\s+/i, /^doctor\s+/i, /^prof\.?\s+/i, /^professor\s+/i,
+    /^mr\.?\s+/i, /^mrs\.?\s+/i, /^ms\.?\s+/i,
+    /^md\.?\s+/i, /^mohammad\s+/i, /^mohammed\s+/i, /^muhammad\s+/i,
+    /^ডা\.?\s*/, /^ডাক্তার\s*/, /^অধ্যাপক\s*/, /^প্রফেসর\s*/,
+    /^মো\.?\s*/, /^মোঃ\s*/, /^মোসাঃ\s*/, /^মুহাম্মদ\s*/, /^মোহাম্মদ\s*/,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of titles) {
+      const next = n.replace(re, "");
+      if (next !== n) { n = next; changed = true; }
+    }
+  }
+  // Keep letters/digits/spaces in any script (Latin, Bangla, etc.), collapse runs of spaces.
+  return n.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+// Damerau-Levenshtein — tolerates one swapped pair of adjacent characters in addition to single
+// inserts/deletes/substitutes. OCR commonly swaps adjacent letters ("Mahmud" ↔ "Mhamud").
+function dlDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
+// Two canonical doctor names are "the same person" if they're an exact match, or within a small
+// edit distance (scaled to name length so short names aren't matched too loosely).
+function sameDoctor(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const len = Math.max(a.length, b.length);
+  const tolerance = len <= 8 ? 1 : len <= 15 ? 2 : len <= 25 ? 3 : 4;
+  return dlDistance(a, b) <= tolerance;
+}
+
+// Synthetic-ID prefix used when no real BMDC was on the prescription.
+const SYNTHETIC_PREFIX = "nb_";
+
+// Build a stable synthetic ID from the canonical name. Same canonical name → same ID, regardless
+// of hospital / OCR whitespace. The lookup table is `nb_<slug>` (40-char cap so localStorage and
+// Firestore document IDs stay friendly).
+export function syntheticDoctorId(name: string): string {
+  const canonical = canonicalizeDoctorName(name);
+  const slug = canonical.replace(/\s+/g, "-").slice(0, 40);
+  return SYNTHETIC_PREFIX + (slug || "unknown");
+}
+
 export function upsertExternalDoctor(d: Omit<ExternalDoctor, "scannedAt" | "scanCount"> & { scanCount?: number }): ExternalDoctor {
   const all = listExternalDoctors();
-  const idx = all.findIndex((x) => x.bmdc === d.bmdc);
+
+  // 1) Exact ID match (real BMDC, or already-canonical synthetic ID).
+  let idx = all.findIndex((x) => x.bmdc === d.bmdc);
+
+  // 2) Synthetic-ID dedup: if the lookup is for a no-BMDC entry, also fuzzy-match by canonical
+  // name against existing synthetic entries. This catches the same doctor re-scanned with OCR
+  // variations ("Dr. Mahmud Rahman" vs "Dr Mahmud Rahmman" vs "DR MAHMUD RAHMAN") that would
+  // otherwise generate different IDs and duplicate the profile.
+  if (idx < 0 && d.bmdc.startsWith(SYNTHETIC_PREFIX) && d.name) {
+    const canon = canonicalizeDoctorName(d.name);
+    if (canon) {
+      idx = all.findIndex((x) =>
+        x.bmdc.startsWith(SYNTHETIC_PREFIX) && sameDoctor(canon, canonicalizeDoctorName(x.name))
+      );
+    }
+  }
+
   if (idx >= 0) {
+    // Merge — keep the existing canonical ID, fill in any new non-empty fields without
+    // overwriting non-empty existing values, and bump scanCount.
     const merged: ExternalDoctor = {
       ...all[idx],
-      name: d.name || all[idx].name,
-      hospital: d.hospital || all[idx].hospital,
-      specialty: d.specialty || all[idx].specialty,
-      district: d.district || all[idx].district,
+      name: all[idx].name || d.name,
+      hospital: all[idx].hospital || d.hospital,
+      specialty: all[idx].specialty || d.specialty,
+      district: all[idx].district || d.district,
       scanCount: (all[idx].scanCount || 0) + 1,
       scannedAt: new Date().toISOString(),
     };
@@ -532,8 +619,14 @@ export function upsertExternalDoctor(d: Omit<ExternalDoctor, "scannedAt" | "scan
     import("./db.ts").then((m) => m.writeExternalDoctor(merged)).catch(() => {});
     return merged;
   }
+
+  // 3) No existing match — create a new entry. For synthetic IDs, normalize to the canonical
+  // form so the FIRST insert is stored under the same key future scans will resolve to.
+  const id = d.bmdc.startsWith(SYNTHETIC_PREFIX) && d.name
+    ? syntheticDoctorId(d.name)
+    : d.bmdc;
   const fresh: ExternalDoctor = {
-    bmdc: d.bmdc,
+    bmdc: id,
     name: d.name,
     hospital: d.hospital,
     specialty: d.specialty,

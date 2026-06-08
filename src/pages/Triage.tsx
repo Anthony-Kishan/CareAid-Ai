@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Mic, Send, Info, Loader2, MicOff, WifiOff, Cpu, Cloud, BookOpen, UserRound, Trash2 } from "lucide-react";
+import { Mic, Send, Info, Loader2, MicOff, WifiOff, UserRound, Trash2, Volume2, Square } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 import { cn } from "@/src/lib/utils";
@@ -13,6 +13,7 @@ import { usePatientProfile, summariseProfile } from "../lib/profile.ts";
 import { listTriageMessages, saveTriageMessages, clearTriageMessages, KEYS, subscribe } from "../lib/store.ts";
 import type { TriageMessage } from "../lib/types.ts";
 import { startManualRecording, isVoiceReady, type ManualRecorder } from "../lib/voiceEngine.ts";
+import { speak, stop as ttsStop, warmupVoices } from "../lib/tts.ts";
 
 interface Message { id?: string; timestamp?: string; role: "user" | "assistant"; content: string; safety?: { verdict: string; matched: string[]; scrubbedLines?: number }; source?: ChatSource; diagnosticForSymptoms?: string; }
 interface OfflineRule { keywords: string[]; verdict: string; en: string; bn: string; }
@@ -41,6 +42,30 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
   const tf = useTfEngine();
   const profile = usePatientProfile();
   const [showProfile, setShowProfile] = useState(false);
+  // TTS state — track which assistant message is currently being read aloud. Tap the speaker
+  // icon on a message to listen; tap the same message again (or another) to stop.
+  const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
+  // Strip the bilingual AI-disclaimer + emoji headers so the spoken reply is clean speech, not
+  // "warning emoji warning" punctuation noise.
+  const cleanForSpeech = (text: string): string =>
+    text
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/[🚨⚠️🏠⏳]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const toggleSpeak = (msgId: string, content: string) => {
+    if (speakingMsgId === msgId) { ttsStop(); setSpeakingMsgId(null); return; }
+    if (speakingMsgId) ttsStop();
+    const clean = cleanForSpeech(content);
+    if (!clean) return;
+    setSpeakingMsgId(msgId);
+    speak(clean, {
+      lang: lang === "bn" ? "bn-BD" : "en-US",
+      onEnd: () => setSpeakingMsgId(null),
+      onError: () => setSpeakingMsgId(null),
+    });
+  };
+  useEffect(() => { warmupVoices(); return () => { ttsStop(); }; }, []);
 
   // Monitor online status
   useEffect(() => {
@@ -354,16 +379,27 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
               )}>
                 <Markdown>{msg.content || (msg.role === "assistant" ? "…" : "")}</Markdown>
               </div>
-              {msg.role === "assistant" && msg.source && i > 0 && (
-                <SourcePill source={msg.source} t={t} />
+              {/* TTS Listen / Stop — bilingual voice output so non-readers can hear the reply.
+                  Only shown for non-empty assistant messages (not the streaming placeholder). */}
+              {msg.role === "assistant" && msg.content && msg.id && i > 0 && (
+                <button
+                  onClick={() => toggleSpeak(msg.id!, msg.content)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-full border transition-colors",
+                    speakingMsgId === msg.id
+                      ? "bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                  )}
+                  aria-label={speakingMsgId === msg.id ? (lang === "bn" ? "থামুন" : "Stop") : (lang === "bn" ? "শুনুন" : "Listen")}
+                >
+                  {speakingMsgId === msg.id ? <Square size={10} className="fill-current" /> : <Volume2 size={10} />}
+                  {speakingMsgId === msg.id ? (lang === "bn" ? "থামুন" : "Stop") : (lang === "bn" ? "শুনুন" : "Listen")}
+                </button>
               )}
               {/* Multi-factor diagnostic panel — runs alongside the chat reply. */}
               {msg.role === "assistant" && msg.diagnosticForSymptoms && (
                 <div className="w-full lg:max-w-[480px] mt-1">
-                  <DiagnosticPanel
-                    symptoms={msg.diagnosticForSymptoms}
-                    onSetProfile={() => setShowProfile(true)}
-                  />
+                  <DiagnosticPanel symptoms={msg.diagnosticForSymptoms} />
                 </div>
               )}
             </motion.div>
@@ -433,21 +469,6 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
       </div>
       </div>
     </div>
-  );
-}
-
-function SourcePill({ source, t }: { source: ChatSource; t: (k: string) => string }) {
-  const map = {
-    cloud: { c: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: <Cloud size={10} />, key: "triage.source.cloud" },
-    kb: { c: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: <BookOpen size={10} />, key: "triage.source.kb" },
-    wasm: { c: "bg-purple-50 text-purple-700 border-purple-200", icon: <Cpu size={10} />, key: "triage.source.wasm" },
-    rules: { c: "bg-amber-50 text-amber-700 border-amber-200", icon: <BookOpen size={10} />, key: "triage.source.rules" },
-  } as const;
-  const m = map[source];
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border ${m.c}`}>
-      {m.icon} {t(m.key)}
-    </span>
   );
 }
 
