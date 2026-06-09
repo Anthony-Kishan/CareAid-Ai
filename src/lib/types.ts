@@ -239,6 +239,12 @@ export interface DiagnosticResult {
   riskScore: number;          // 0-100
   riskLevel: RiskLevel;
   severity: "mild" | "urgent" | "critical";
+  // True when BM25 confidence is below the abstention threshold — UI should render an
+  // "I need more details" state instead of a confident verdict, and ignore riskScore.
+  lowConfidence?: boolean;
+  // Title of the top matched KB entry (when not abstaining) so the UI can show
+  // "Likely: <condition>" — making the verdict explainable rather than a bare percentage.
+  matchedTitle?: { en: string; bn: string };
   reason_en: string;          // one-paragraph "why this risk"
   reason_bn: string;
   warning_en?: string;        // time-sensitive flag e.g. "platelet drop in 24h"

@@ -141,10 +141,6 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     // first-message guess.
     const userTurnsSoFar = messages.filter(m => m.role === "user").length + 1;
     const DIAGNOSTIC_AFTER = 3;
-    const allUserSymptoms = [
-      ...messages.filter(m => m.role === "user").map(m => m.content),
-      userMessage,
-    ].join("\n");
 
     // Insert an empty assistant placeholder so streaming tokens can fill in live. Match it by a
     // stable `id` (NOT array index): in React's concurrent/batched mode a captured index can be
@@ -157,10 +153,14 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
         timestamp: new Date().toISOString(),
         role: "assistant",
         content: "",
-        // Only stamp the diagnostic trigger once we have enough turns. Pass the FULL
-        // concatenated symptom history so the engine reasons over everything, not the
-        // latest message alone.
-        diagnosticForSymptoms: userTurnsSoFar >= DIAGNOSTIC_AFTER ? allUserSymptoms : undefined,
+        // Only stamp the diagnostic trigger once we have enough turns. Pass ONLY the latest
+        // user message (not the concatenated history) — concatenation made BM25 token frequency
+        // dominated by earlier turns, so when the patient changed topic ("baby fever" → "tonsil
+        // pain") the panel kept matching the old topic. The chat LLM still has the full history
+        // for its reply; the panel just needs the user's current concern. Abstention in
+        // runDiagnostic handles off-topic follow-ups ("what can I do before hospital?") that
+        // carry no symptom signal of their own.
+        diagnosticForSymptoms: userTurnsSoFar >= DIAGNOSTIC_AFTER ? userMessage : undefined,
       },
     ]);
 
@@ -228,10 +228,34 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     }
     const recognition = new SpeechRecognition();
     recognition.lang = lang === "bn" ? "bn-BD" : "en-US";
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    // continuous + interimResults so a natural mid-sentence pause doesn't end the recording —
+    // the user controls stop by tapping the mic again. We accumulate FINAL transcripts across
+    // multiple onresult events (Web Speech fires one per utterance) so users can speak in
+    // multiple sentences with pauses between.
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
-    recognition.onresult = (e: any) => { setInput(e.results[0][0].transcript); setIsRecording(false); };
+
+    // Track final transcripts accumulated during THIS recording session, so we can append them
+    // to whatever was already in the input box (instead of overwriting an in-progress draft).
+    const sessionFinalsRef = { current: "" };
+    const startingInput = input.trim();
+
+    recognition.onresult = (e: any) => {
+      // Each event delivers all results so far. Walk the new ones, append only finalised ones.
+      let newFinal = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) newFinal += (newFinal ? " " : "") + (r[0]?.transcript || "").trim();
+      }
+      if (!newFinal) return;
+      sessionFinalsRef.current = (sessionFinalsRef.current ? sessionFinalsRef.current + " " : "") + newFinal;
+      // Live update of the input box so the user sees their words appear as they speak.
+      const composed = startingInput
+        ? startingInput + (sessionFinalsRef.current ? " " + sessionFinalsRef.current : "")
+        : sessionFinalsRef.current;
+      setInput(composed);
+    };
     recognition.onerror = (e: any) => {
       if (e.error === "not-allowed") {
         alert(lang === "bn" ? "মাইক্রোফোন ব্লক করা আছে।" : "Microphone blocked.");
@@ -244,6 +268,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
             : "Voice service unavailable. Download Offline AI in Settings for offline voice.");
         })();
       }
+      // "no-speech" and "aborted" are normal — don't alert. Just stop.
       setIsRecording(false);
     };
     recognition.onend = () => setIsRecording(false);
@@ -272,10 +297,28 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     if (!rec) return;
     manualRecRef.current = null;
     try {
-      const text = await rec.stop();
-      if (text) setInput(text);
+      const text = (await rec.stop() || "").trim();
+      if (text) {
+        // Append to whatever was already in the input field — don't clobber an in-progress draft
+        // or a previous voice segment (users often record symptoms in multiple short bursts).
+        setInput((prev) => {
+          const base = prev.trim();
+          return base ? base + " " + text : text;
+        });
+      } else {
+        // Empty transcription — Whisper heard the audio but couldn't recognise speech (silence,
+        // background noise, mic too far). Tell the user instead of failing silently.
+        alert(lang === "bn"
+          ? "কোনো কথা শুনতে পেলাম না। মাইক্রোফোনের কাছে গিয়ে আরেকটু জোরে কথা বলুন।"
+          : "I couldn't make out any speech. Please speak closer to the mic and try again.");
+      }
     } catch (e) {
+      // Surface the failure instead of console.error — users were getting nothing at all when
+      // offline transcription crashed (model load race, decode error, etc.)
       console.error("[voice] transcription failed", e);
+      alert(lang === "bn"
+        ? "অফলাইন ভয়েস প্রক্রিয়াকরণে সমস্যা হয়েছে। আবার চেষ্টা করুন বা পেজ রিফ্রেশ করুন।"
+        : "Offline voice processing failed. Please try again or refresh the page.");
     } finally {
       setIsRecording(false);
       setVoiceMode("idle");
@@ -392,7 +435,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
             title={lang === "bn" ? "চ্যাট মুছুন" : "Clear chat"}
           >
             <Trash2 size={12} />
-            {lang === "bn" ? "মুছুন" : "Clear"}
+            {lang === "bn" ? "চ্যাট মুছুন" : "Clear Chat"}
           </button>
         )}
       </div>

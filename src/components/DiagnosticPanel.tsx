@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, MapPin, Loader2, ShieldAlert, Phone } from "lucide-react";
+import { AlertTriangle, MapPin, Loader2, ShieldAlert, Phone, HelpCircle } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useLanguage } from "../lib/LanguageContext.tsx";
 import { runDiagnostic, getDiagnosticCandidates } from "../lib/diagnostic.ts";
@@ -71,16 +71,56 @@ export function DiagnosticPanel({ symptoms }: DiagnosticPanelProps) {
           </motion.div>
         )}
 
-        {phase === "ready" && result && (
+        {phase === "ready" && result && result.lowConfidence && (
+          <motion.div
+            key="low-confidence"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <LowConfidenceCard reason={lang === "bn" ? result.reason_bn : result.reason_en} symptoms={symptoms} lang={lang as "en" | "bn"} />
+          </motion.div>
+        )}
+
+        {phase === "ready" && result && !result.lowConfidence && (
           <motion.div
             key="ready"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
           >
-            <RiskVerdictCard result={result} t={t} lang={lang as "en" | "bn"} />
+            <RiskVerdictCard result={result} t={t} lang={lang as "en" | "bn"} symptoms={symptoms} />
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+// Honest "I don't have enough to commit to a verdict" card. Rendered when BM25 confidence is
+// below the abstention threshold (off-topic follow-ups, very vague descriptions, topic change
+// to something not yet detailed enough). No percentage, no fabricated condition name.
+function LowConfidenceCard({ reason, symptoms, lang }: { reason: string; symptoms: string; lang: "en" | "bn" }) {
+  const heardLabel = lang === "bn" ? "আপনি লিখেছেন" : "What I heard";
+  const reported = symptoms.trim().replace(/\s+/g, " ").slice(0, 140);
+  const ellipsis = symptoms.trim().length > 140 ? "…" : "";
+  return (
+    <div className="rounded-3xl border border-amber-100 bg-amber-50 p-5 shadow-sm">
+      <header className="flex items-start gap-3 mb-3">
+        <div className="w-10 h-10 rounded-2xl border border-amber-100 bg-white/70 flex items-center justify-center shrink-0 text-amber-700">
+          <HelpCircle size={22} />
+        </div>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700/80">
+            {lang === "bn" ? "তথ্য আরো দরকার" : "More info needed"}
+          </p>
+          <p className="text-sm text-amber-900 mt-1 leading-relaxed">{reason}</p>
+        </div>
+      </header>
+      {reported && (
+        <div className="rounded-xl bg-white/70 border border-amber-100 p-3">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700/80">{heardLabel}</p>
+          <p className="text-xs text-amber-900 mt-1 italic">{`"${reported}${ellipsis}"`}</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -89,10 +129,12 @@ function RiskVerdictCard({
   result,
   t,
   lang,
+  symptoms,
 }: {
   result: DiagnosticResult;
   t: (k: string) => string;
   lang: "en" | "bn";
+  symptoms: string;
 }) {
   const tone =
     result.riskLevel === "high"
@@ -115,6 +157,16 @@ function RiskVerdictCard({
       ? lang === "bn" ? "মধ্যম ঝুঁকি" : "Medium risk"
       : lang === "bn" ? "কম ঝুঁকি" : "Low risk";
 
+  // Sanity-check helpers so the verdict is auditable instead of a bare percentage.
+  // 1) "What I heard" — echo the patient's own words so they can confirm we read them right.
+  // 2) "Likely" — name the matched KB condition in their language. Bare numbers are scary;
+  //    a named condition tied to a tier ("Likely: <name>, Low risk") is honest and explainable.
+  const reported = symptoms.trim().replace(/\s+/g, " ").slice(0, 140);
+  const ellipsis = symptoms.trim().length > 140 ? "…" : "";
+  const matchedTitle = result.matchedTitle
+    ? lang === "bn" ? result.matchedTitle.bn : result.matchedTitle.en
+    : null;
+
   return (
     <div className={`rounded-3xl border ${tone.border} ${tone.bg} p-5 shadow-sm`}>
       <header className="flex items-start justify-between gap-3 mb-3">
@@ -122,11 +174,26 @@ function RiskVerdictCard({
           <p className={`text-3xl font-black ${tone.text}`}>
             {result.riskScore}% <span className="text-lg font-bold">— {riskLabel}</span>
           </p>
+          {matchedTitle && (
+            <p className={`text-xs font-medium mt-1 ${tone.muted}`}>
+              {(lang === "bn" ? "সম্ভাব্য: " : "Likely: ") + matchedTitle}
+            </p>
+          )}
         </div>
         <div className={`w-12 h-12 rounded-2xl border ${tone.border} ${tone.bg} flex items-center justify-center shrink-0`}>
           <AlertTriangle className={tone.text} size={26} />
         </div>
       </header>
+
+      {/* What I heard — echoes the patient's own words so they can verify what we matched. */}
+      {reported && (
+        <div className={`rounded-xl bg-white/60 border ${tone.border} p-3 mb-3`}>
+          <p className={`text-[10px] font-bold uppercase tracking-widest ${tone.muted}`}>
+            {lang === "bn" ? "আপনি লিখেছেন" : "What I heard"}
+          </p>
+          <p className={`text-xs ${tone.text} mt-1 italic`}>{`"${reported}${ellipsis}"`}</p>
+        </div>
+      )}
 
       {/* Reason */}
       <div className={`rounded-xl bg-white/60 border ${tone.border} p-3`}>

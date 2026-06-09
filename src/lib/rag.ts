@@ -34,13 +34,54 @@ export async function loadKb(): Promise<KbDocument> {
 // ── Tokenizer ──────────────────────────────────────────────────────────────
 // Handles EN + BN. Lower-cases ASCII, strips ASCII punctuation, splits on whitespace.
 // For Bangla we just split on whitespace — Bangla doesn't need lower-casing.
+//
+// We filter STOPWORDS (pronouns, question words, conjunctions, modal/auxiliary verbs) before
+// scoring. Without this filter, an off-topic patient follow-up like "হাসপাতালে যাওয়ার আগে আমি
+// আর কী করতে পারি?" (= "what can I do before going to hospital?") was matching `heat-cramps`
+// with score 7.04 because the connective "আর" happened to appear in only one KB entry, giving
+// it artificially high IDF. Stopwords carry no symptom signal but can dominate BM25 when their
+// document frequency is low. The list is intentionally conservative — no medical terms.
+const STOPWORDS = new Set<string>([
+  // English pronouns / aux verbs / modals
+  "me", "my", "mine", "we", "us", "our",
+  "you", "your", "yours", "he", "she", "him", "her", "it", "its", "they", "them", "their",
+  "is", "am", "are", "was", "were", "be", "been", "being",
+  "do", "does", "did", "done", "doing",
+  "have", "has", "had", "having",
+  "can", "could", "should", "would", "will", "shall", "may", "might", "must",
+  "what", "why", "how", "where", "when", "who", "which", "whose",
+  "and", "or", "but", "so", "if", "because", "than", "then",
+  "the", "an", "this", "that", "these", "those",
+  "with", "from", "into", "onto", "by", "for", "of", "on", "at", "in", "to", "as",
+  "also", "just", "very", "more", "much", "many", "some", "any", "no", "not",
+  "before", "after", "now", "still",
+  // Bangla pronouns
+  "আমি", "আমার", "আমাকে", "আমরা", "আমাদের", "আপনি", "আপনার", "আপনাকে",
+  "সে", "তার", "তাকে", "তারা", "তাদের", "এ", "এই", "ওই", "সেই", "ইনি", "উনি",
+  // Bangla question words
+  "কী", "কি", "কেন", "কীভাবে", "কোথায়", "কখন", "কে", "কারা", "কোন", "কত", "কতটা", "কেমন",
+  // Bangla conjunctions / particles
+  "আর", "এবং", "অথবা", "কিন্তু", "তবে", "কারণ", "যে", "যা", "যদি", "তাহলে", "তো", "ই",
+  // Bangla modal / auxiliary verbs (common forms)
+  "করতে", "করব", "করছি", "করেছি", "করেছেন", "করুন", "পারি", "পারে", "পারছি", "পারব", "পারবে",
+  "হবে", "হয়", "হচ্ছে", "হয়েছে", "ছিল", "ছিলাম", "থাকবে", "থাকে", "থাকি", "ছিলেন",
+  "যাওয়া", "যাওয়ার", "যাচ্ছি", "যাবে", "যাব", "যান",
+  "আছি", "আছে", "আছেন", "নেই",
+  // Bangla time/position words
+  "আগে", "পরে", "এখন", "তখন", "প্রথম", "পর", "শুরু",
+  // Bangla quantifiers / qualifiers
+  "একটু", "অনেক", "সব", "সবাই", "শুধু", "মাত্র", "প্রায়", "বেশ", "খুব",
+  // Bangla connectives
+  "জন্য", "সাথে", "থেকে", "পর্যন্ত", "মতো", "মতন",
+]);
+
 export function tokenize(text: string): string[] {
   if (!text) return [];
   return text
     .toLowerCase()
     .replace(/[.,;:!?()"'`\-_/\\]/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length >= 2);
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
 }
 
 // ── BM25 index ─────────────────────────────────────────────────────────────

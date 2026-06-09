@@ -76,15 +76,17 @@ function symptomHint(text: string, max = 70): string {
   return trimmed.length > max ? trimmed.slice(0, max - 1) + "…" : trimmed;
 }
 
-// Severity-ordering: rural-user safe default. When several conditions match the same keywords
-// (e.g. "fever + headache" hits both mild-fever AND meningitis), the BENIGN/common one should
-// appear FIRST so the patient doesn't see "suspected meningitis" as the headline guess.
-const SEVERITY_ORDER: Record<"mild" | "urgent" | "critical", number> = { mild: 0, urgent: 1, critical: 2 };
+// Safety-first severity tie-break: when two candidates have equal BM25 score, the MORE SEVERE
+// one wins. This is the reverse of an older "mild first" sort that was meant for a now-removed
+// human-pick UI — without a human in the loop, an "auto-pick mild" silently downgrades critical
+// conditions (e.g. baby-fever-+-diarrhea misread as adult heat-cramps). For triage, false-
+// negatives on critical conditions are far worse than false-positives on mild ones.
+const SEVERITY_RANK: Record<"mild" | "urgent" | "critical", number> = { mild: 0, urgent: 1, critical: 2 };
 
-// Common-fallback ids that should appear in the candidate list when their tags overlap the
-// query, even if their BM25 score isn't top-3. Prevents the "fever+headache → meningitis"
-// failure mode where a critical condition crowds out the obvious mild explanation.
-const COMMON_FALLBACK_IDS = ["fever-adult-mild", "headache-mild", "cold-runny-nose", "cough-persistent", "diarrhea-adult", "sore-throat", "stomach-pain-severe"];
+// Minimum BM25 score above which we trust the KB top match enough to issue a verdict. Below
+// this, we abstain ("I need more details") rather than fabricate one. Tuned against the 82-
+// entry KB: real-symptom queries score 6-16; weak/off-topic queries score 0.4-2.0.
+export const MIN_KB_CONFIDENCE = 2.5;
 
 // Fast, geolocation-free lookup of the top candidate conditions for a symptom description.
 export async function getDiagnosticCandidates(symptoms: string, _lang: "en" | "bn"): Promise<CandidateResult> {
@@ -98,22 +100,9 @@ export async function getDiagnosticCandidates(symptoms: string, _lang: "en" | "b
     if (!ex || m.score > ex.score) byId.set(m.entry.id, { entry: m.entry, score: m.score });
   }
 
-  // Try to also include a generic mild fallback if its tags overlap any query token (so we never
-  // show ONLY critical conditions when the patient mentioned a common symptom).
-  const queryLower = symptoms.toLowerCase();
-  for (const id of COMMON_FALLBACK_IDS) {
-    if (byId.has(id)) continue;
-    // Pull the entry from the larger match set or fetch by id-as-query.
-    const extra = await retrieveWithScore(id.replace(/-/g, " "), 5);
-    const found = extra.find((m) => m.entry.id === id);
-    if (!found) continue;
-    const overlap = [...found.entry.tags_en, ...found.entry.tags_bn].some((tag) =>
-      queryLower.includes(tag.toLowerCase()) || symptoms.includes(tag)
-    );
-    if (overlap) byId.set(id, { entry: found.entry, score: found.score * 0.6 }); // light penalty vs direct matches
-  }
-
-  // Convert + sort: severity ASC (mild first), then BM25 score DESC.
+  // Sort by BM25 score DESC first (what BM25 actually thinks is closest), tie-break by HIGHER
+  // severity (safety-first). No mild-bias injection — that was the bug behind the heat-cramps
+  // misclassification.
   const arr = Array.from(byId.values()).map(({ entry, score }) => ({
     id: entry.id,
     hint_en: symptomHint(entry.summary.en),
@@ -122,8 +111,8 @@ export async function getDiagnosticCandidates(symptoms: string, _lang: "en" | "b
     score: Math.round(score * 100) / 100,
   }));
   arr.sort((a, b) => {
-    const s = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
-    return s !== 0 ? s : b.score - a.score;
+    if (b.score !== a.score) return b.score - a.score;
+    return SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
   });
 
   return {
@@ -163,7 +152,29 @@ export async function runDiagnostic(opts: RunOpts): Promise<DiagnosticResult> {
     }
   }
   const topEntry = orderedMatches[0]?.entry;
+  const topScore = orderedMatches[0]?.score ?? 0;
   const matchedKbIds = orderedMatches.map((m) => m.entry.id);
+
+  // Abstention — if BM25 confidence is too weak AND the safety classifier didn't flag a clear
+  // emergency AND the patient didn't force a specific entry, return a "low confidence" result
+  // so the UI can ask for more details instead of guessing. This kills the failure mode where
+  // an off-topic message ("what can I do before hospital?") gets locked onto an unrelated KB
+  // entry and shown as a confident verdict.
+  if (!forcedEntryId && safety.verdict !== "critical" && (topScore < MIN_KB_CONFIDENCE || !topEntry)) {
+    return {
+      riskScore: 0,
+      riskLevel: "low",
+      severity: "mild",
+      lowConfidence: true,
+      reason_en: "I couldn't confidently match your message to a condition. Please describe your main complaint in one sentence — onset, what hurts, anything that started or changed recently.",
+      reason_bn: "আপনার বার্তাটি কোনো নির্দিষ্ট সমস্যার সাথে নিশ্চিতভাবে মেলাতে পারিনি। অনুগ্রহ করে এক বাক্যে মূল সমস্যা বলুন — কখন শুরু, কোথায় কষ্ট, সম্প্রতি কী নতুন হয়েছে।",
+      factors: [],
+      cta_en: "Describe your symptoms",
+      cta_bn: "আপনার লক্ষণ বর্ণনা করুন",
+      matchedKbIds: [],
+      nearestHospitals: [],
+    };
+  }
 
   let score = topEntry ? severityBase(topEntry.severity) : 20;
   let severity: DiagnosticResult["severity"] = topEntry?.severity || "mild";
@@ -384,6 +395,7 @@ export async function runDiagnostic(opts: RunOpts): Promise<DiagnosticResult> {
     riskScore: score,
     riskLevel: level,
     severity,
+    matchedTitle: topEntry ? { en: topEntry.title.en, bn: topEntry.title.bn } : undefined,
     reason_en,
     reason_bn,
     warning_en,
