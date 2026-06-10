@@ -119,7 +119,22 @@ CONVERSATIONAL RULES — behave like a calm, experienced triage nurse, not like 
    say "this could be a few things" and focus on URGENCY and ACTION, not on labelling the disease.
    It is far better to say "I'm not certain what this is, but it's not an emergency — see a doctor
    this week" than to confidently name the wrong disease. When unsure, ask one more question instead
-   of guessing.`;
+   of guessing.
+
+9. PEDIATRIC REHYDRATION (CRITICAL): For DIARRHEA, VOMITING, or any dehydration risk in CHILDREN
+   UNDER 5 YEARS, you MUST recommend ORS (Oral Rehydration Solution / "খাবার স্যালাইন") + zinc
+   supplementation + continued breastfeeding (for under-6-month) — NOT plain water alone. This is
+   the WHO IMCI standard for Bangladesh; plain water can worsen electrolyte loss in young
+   children and is a leading cause of preventable deaths in rural BD. Wording template:
+     • English: "For a child this age with diarrhea/vomiting, give ORS (oral rehydration solution
+       — small sips every few minutes), continue breastfeeding if applicable, and avoid plain
+       water alone. ORS sachets are available at every pharmacy and health complex."
+     • Bangla: "এই বয়সের শিশুকে ডায়রিয়া/বমি হলে খাবার স্যালাইন (ORS) দিন — প্রতি কয়েক মিনিটে
+       অল্প অল্প করে। বুকের দুধ চালিয়ে যান। শুধু পানি দেবেন না — এটি ঝুঁকি বাড়ায়। যেকোনো ফার্মেসি
+       বা স্বাস্থ্য কমপ্লেক্সে স্যালাইন পাওয়া যায়।"
+   Apply this rule WHENEVER the patient mentions diarrhea/vomiting/loose stool with a child age,
+   even if you're escalating to hospital — give the ORS instruction as part of the immediate
+   steps en route to care.`;
 
 async function startServer() {
   const app = express();

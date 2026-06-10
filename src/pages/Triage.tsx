@@ -42,6 +42,12 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
   const tf = useTfEngine();
   const profile = usePatientProfile();
   const [showProfile, setShowProfile] = useState(false);
+  // Chief complaint — the FIRST symptom-bearing user message of the current complaint episode.
+  // Combined with the latest message for the diagnostic panel so a context-free clarification
+  // ("yes diarrhea, breathing normal, alert") doesn't lose the original "8mo baby + fever"
+  // context. Resets on Clear Chat, and when the previous assistant turn issued a verdict
+  // (🚨 GO TO HOSPITAL / 🏠 FIRST-AID / ⏳ WAIT-AND-WATCH) which marks the end of an episode.
+  const chiefComplaintRef = useRef<string | null>(null);
   // TTS state — track which assistant message is currently being read aloud. Tap the speaker
   // icon on a message to listen; tap the same message again (or another) to stop.
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
@@ -142,6 +148,31 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
     const userTurnsSoFar = messages.filter(m => m.role === "user").length + 1;
     const DIAGNOSTIC_AFTER = 3;
 
+    // ── Chief complaint tracking ────────────────────────────────────────────
+    // Detect the start of a new complaint episode. Cases that warrant resetting the chief:
+    //   • No chief yet (first user message of the session).
+    //   • Previous assistant reply ended with a verdict — 🚨/🏠/⏳ markers — signalling the
+    //     prior episode is closed, so a new symptom-bearing user message starts a fresh chief.
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    const verdictMarkers = /🚨|🏠|⏳|GO TO HOSPITAL NOW|FIRST-AID|WAIT AND WATCH|এখনই হাসপাতালে|বাড়িতে প্রাথমিক|অপেক্ষা করুন/;
+    const prevEpisodeClosed = lastAssistant ? verdictMarkers.test(lastAssistant.content) : false;
+    if (!chiefComplaintRef.current || prevEpisodeClosed) {
+      // Only adopt this turn as the chief if it has enough substance to be a complaint
+      // (a 2-word reply like "yes diarrhea" carries no chief context on its own).
+      if (userMessage.trim().split(/\s+/).length >= 3) {
+        chiefComplaintRef.current = userMessage;
+      }
+    }
+
+    // Compose what the diagnostic panel reasons over: chief + latest message. This keeps the
+    // original context ("8mo baby with 102°F") in scope when the patient is answering a
+    // clarification ("yes diarrhea, breathing normal, alert") — so BM25 still sees the fever
+    // tokens, not just the new clarifier. The cloud LLM separately has the full chat history
+    // for its reply.
+    const symptomsForPanel = chiefComplaintRef.current && chiefComplaintRef.current !== userMessage
+      ? chiefComplaintRef.current + ". " + userMessage
+      : userMessage;
+
     // Insert an empty assistant placeholder so streaming tokens can fill in live. Match it by a
     // stable `id` (NOT array index): in React's concurrent/batched mode a captured index can be
     // wrong or never set, which silently drops every streamed chunk. The id is bulletproof.
@@ -153,14 +184,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
         timestamp: new Date().toISOString(),
         role: "assistant",
         content: "",
-        // Only stamp the diagnostic trigger once we have enough turns. Pass ONLY the latest
-        // user message (not the concatenated history) — concatenation made BM25 token frequency
-        // dominated by earlier turns, so when the patient changed topic ("baby fever" → "tonsil
-        // pain") the panel kept matching the old topic. The chat LLM still has the full history
-        // for its reply; the panel just needs the user's current concern. Abstention in
-        // runDiagnostic handles off-topic follow-ups ("what can I do before hospital?") that
-        // carry no symptom signal of their own.
-        diagnosticForSymptoms: userTurnsSoFar >= DIAGNOSTIC_AFTER ? userMessage : undefined,
+        diagnosticForSymptoms: userTurnsSoFar >= DIAGNOSTIC_AFTER ? symptomsForPanel : undefined,
       },
     ]);
 
@@ -429,6 +453,7 @@ export function TriagePage({ onLoginRequired, user }: { onLoginRequired: () => v
               const ok = window.confirm(lang === "bn" ? "চ্যাট মুছে ফেলবেন? এটি ফিরিয়ে আনা যাবে না।" : "Clear this chat? This cannot be undone.");
               if (!ok) return;
               clearTriageMessages();
+              chiefComplaintRef.current = null;
               setMessages([{ id: genMsgId(), timestamp: new Date().toISOString(), role: "assistant", content: t("triage.welcome") }]);
             }}
             className="shrink-0 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[10px] font-bold text-gray-500 hover:text-red-600 hover:bg-red-50 transition-colors"
