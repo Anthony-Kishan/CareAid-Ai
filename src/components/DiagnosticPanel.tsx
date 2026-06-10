@@ -195,14 +195,6 @@ function RiskVerdictCard({
         </div>
       )}
 
-      {/* Reason */}
-      <div className={`rounded-xl bg-white/60 border ${tone.border} p-3`}>
-        <p className={`text-[10px] font-bold uppercase tracking-widest ${tone.muted}`}>{t("diag.reason")}</p>
-        <p className={`text-sm ${tone.text} mt-1`}>
-          {lang === "bn" ? result.reason_bn : result.reason_en}
-        </p>
-      </div>
-
       {/* Warning */}
       {(result.warning_en || result.warning_bn) && (
         <div className="mt-3 rounded-xl bg-red-600 text-white p-4">

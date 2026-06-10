@@ -44,6 +44,7 @@ const NAV = [
   { id: "stack", label: "Tech Stack" },
   { id: "api", label: "API Docs" },
   { id: "ai-layer", label: "AI Layer" },
+  { id: "safety-hardening", label: "Safety Hardening" },
   { id: "roadmap", label: "Roadmap" },
   { id: "security", label: "Security" },
   { id: "analytics", label: "Analytics" },
@@ -165,7 +166,7 @@ export function DocsPage() {
 
           <Section id="solution" kicker="02 · Solution" title="A triage nurse in every pocket — that works offline">
             <p>CareAid AI is a fully offline-capable AI health companion. It gives <strong>clinical triage, prescription scanning, and first-aid guidance in Bangla</strong>, on low-end phones, without requiring internet.</p>
-            <p>The core insight: we don't try to <em>diagnose diseases</em> (the hardest, most dangerous AI task). We <strong>triage to a safe action</strong> and <strong>confirm with the patient</strong> instead of guessing — built on 82 clinician-authored protocols that run in &lt;5 ms on any device.</p>
+            <p>The core insight: we don't try to <em>diagnose diseases</em> (the hardest, most dangerous AI task). We <strong>triage to a safe action</strong>, <strong>abstain when our retrieval confidence is low</strong>, and run two independent reasoners side-by-side (a free-form chat LLM and a deterministic BM25 panel) so a hallucination by one is caught by the other — built on 82 clinician-authored protocols that run in &lt;5 ms on any device.</p>
             <FeatureGrid />
           </Section>
 
@@ -257,11 +258,15 @@ export function DocsPage() {
             <AiLayer stats={stats} />
           </Section>
 
-          <Section id="roadmap" kicker="T6 · Roadmap" title="Product roadmap">
+          <Section id="safety-hardening" kicker="T6 · Safety Hardening" title="How we keep the side-panel verdict honest">
+            <SafetyHardening />
+          </Section>
+
+          <Section id="roadmap" kicker="T7 · Roadmap" title="Product roadmap">
             <Roadmap />
           </Section>
 
-          <Section id="security" kicker="T7 · Security" title="Security, RBAC & data protection">
+          <Section id="security" kicker="T8 · Security" title="Security, RBAC & data protection">
             <ul className="list-disc pl-5 space-y-1.5">
               <li><strong>Auth:</strong> Firebase Auth (email/password + Google OAuth).</li>
               <li><strong>RBAC:</strong> Firestore security rules enforce per-user isolation (<code>users/&#123;uid&#125;/*</code>); admin gate on /docs.</li>
@@ -270,7 +275,7 @@ export function DocsPage() {
             </ul>
           </Section>
 
-          <Section id="analytics" kicker="T8 · Analytics" title="KPIs & usage metrics">
+          <Section id="analytics" kicker="T9 · Analytics" title="KPIs & usage metrics">
             <ul className="list-disc pl-5 space-y-1.5">
               <li>Triage sessions completed; % resolved offline vs cloud.</li>
               <li>Red-flag emergencies detected & routed to hospital.</li>
@@ -280,7 +285,7 @@ export function DocsPage() {
             </ul>
           </Section>
 
-          <Section id="changelog" kicker="T9 · Changelog" title="Version history">
+          <Section id="changelog" kicker="T10 · Changelog" title="Version history">
             <Changelog />
           </Section>
 
@@ -549,7 +554,7 @@ function CompareTable() {
     ["Bangla voice input", "CareAid AI", true, "Typical telehealth", false],
     ["Runs on 2GB Android", "CareAid AI", true, "Typical telehealth", false],
     ["Clinician-authored, no hallucination", "CareAid AI", true, "Generic chatbots", false],
-    ["Confirms with patient, doesn't guess", "CareAid AI", true, "Diagnostic AI", false],
+    ["Abstains honestly when retrieval confidence is low", "CareAid AI", true, "Diagnostic AI", false],
   ];
   return (
     <div className="not-prose overflow-x-auto">
@@ -742,9 +747,80 @@ function AiLayer({ stats }: { stats: LiveStats | null }) {
   );
 }
 
+function SafetyHardening() {
+  // Each entry is one clinical / retrieval safety mechanism we added to keep the side-panel
+  // verdict honest. Pitch frame: the chat LLM and the BM25 panel are two INDEPENDENT reasoners;
+  // these mechanisms harden the BM25 panel + the cloud prompt so neither can quietly drift.
+  const items: { title: string; how: string; src: string }[] = [
+    {
+      title: "Negation-aware retrieval",
+      how: "stripNormalcyClauses() splits the patient's message on punctuation + conjunctions, drops any clause containing normalcy phrases (স্বাভাবিকভাবে, ভালো আছে, ঠিক আছে, জাগ্রত আছে, fine, normal, no <symptom>, not <aux>) or Bangla negation particles (নেই, নাই, নয়). Applied only to the query, never to KB docs. Fixed the case where 'breathing normally, alert' was matching the breathing-difficulty entry — the OPPOSITE of what the patient reported.",
+      src: "src/lib/rag.ts",
+    },
+    {
+      title: "Implicit-symptom enrichment",
+      how: "deriveImplicitSymptoms() detects temperature readings (≥99°F / ≥38°C, Bangla numerals normalised) and pediatric age (≤24 months or ≤5 years), then injects derived clinical tokens — fever, infant, pediatric, infant fever — into the BM25 query. So '৮ মাস বয়সী, ১০২ ডিগ্রী' now correctly hits fever-child-high (urgent) and fever-infant (critical) instead of an adult-diarrhea entry.",
+      src: "src/lib/rag.ts",
+    },
+    {
+      title: "Self-reflective abstention",
+      how: "MIN_KB_CONFIDENCE = 2.5 threshold in runDiagnostic(). If the top BM25 score is below threshold (and no safety-critical flag fired and no forced entry), the engine returns lowConfidence: true. The UI renders an amber 'More info needed' card with the patient's own words echoed back — no percentage, no fabricated condition. Honest over confident.",
+      src: "src/lib/diagnostic.ts · src/components/DiagnosticPanel.tsx",
+    },
+    {
+      title: "Chief-complaint tracking",
+      how: "chiefComplaintRef captures the first symptom-bearing user message (≥3 words). The diagnostic panel reasons over chief + latest, so a context-free clarification ('yes diarrhea, breathing normal, alert') doesn't lose the original '8mo baby + 102°F' context. Auto-resets on Clear Chat AND when the previous assistant message contained a verdict marker (🚨/🏠/⏳) — that's the explicit end-of-episode signal.",
+      src: "src/pages/Triage.tsx",
+    },
+    {
+      title: "Safety-DESC tie-break + stopword filter",
+      how: "Candidate sort is BM25 score DESC with severity DESC tie-break (critical wins ties) — replaces an earlier mild-first sort that was silently downgrading critical conditions to low-risk auto-picks. Stopword list (BN+EN pronouns, modal/aux verbs, conjunctions, time/position words, question words) prevents a connective like 'আর' from driving 4+ IDF on a single-doc accident.",
+      src: "src/lib/diagnostic.ts · src/lib/rag.ts",
+    },
+    {
+      title: "Two independent reasoners, two safety nets",
+      how: "The cloud/WASM chat reply and the BM25 DiagnosticPanel run in parallel and never share state. If the LLM hallucinates a wrong condition the BM25 panel is unaffected; if BM25 picks the wrong entry the LLM's free-form reasoning catches it. Plus a third always-on net: safety.classifySymptoms() runs a regex red-flag classifier on every input, and safety.scrubMedicines() strips dose-pattern lines from any critical-verdict reply.",
+      src: "src/lib/tierRouter.ts · src/lib/safety.ts",
+    },
+    {
+      title: "Pediatric ORS clinical rule (WHO IMCI)",
+      how: "TRIAGE_SYSTEM in server.ts (cloud) and the offline system prompt in tierRouter.ts both carry an explicit rule: for diarrhea/vomiting in children under 5, recommend ORS (খাবার স্যালাইন) + zinc + continued breastfeeding — never plain water. Bilingual phrasing templates included. Plain water is a leading preventable-death cause for infants with diarrhea in rural BD; the rule fires even when escalating to hospital, as the immediate en-route action.",
+      src: "server.ts · src/lib/tierRouter.ts",
+    },
+    {
+      title: "Voice & UX reliability",
+      how: "Web Speech runs in continuous + interim-results mode, accumulating final transcripts across utterances so a natural mid-sentence pause doesn't end the recording. Multiple voice segments append to the input draft instead of overwriting. Whisper warm-up is triggered on-demand when offline (model can be cached even when the localStorage flag was evicted) — fixed the false 'go download' alert. Empty/failed offline transcription surfaces a bilingual alert instead of silently failing. Per-message TTS Listen button reads any reply aloud in BN/EN.",
+      src: "src/pages/Triage.tsx · src/lib/voiceEngine.ts · src/lib/tts.ts",
+    },
+    {
+      title: "Gemini multi-key rotation",
+      how: "collectGeminiKeys() merges GEMINI_API_KEY (legacy), GEMINI_API_KEYS (comma list), and GEMINI_API_KEY_1..._10 (numbered). Prescription-scan endpoint iterates clients on isGeminiQuotaError() (detects 429 / quota / rate / permission). Multiplies free-tier headroom for judging without hardcoded retry loops.",
+      src: "server.ts",
+    },
+  ];
+  return (
+    <div className="not-prose space-y-3">
+      <p className="text-sm text-gray-600">
+        After observing a wrong-verdict failure in safety testing (an 8-month-old with fever + diarrhea was matched to an unrelated condition), we hardened the BM25 panel and the cloud prompt with the mechanisms below. Each is small, defensible, and code-cited — the failure became the regression test.
+      </p>
+      <div className="grid sm:grid-cols-2 gap-3">
+        {items.map((it) => (
+          <div key={it.title} className="border border-gray-100 rounded-xl p-4 bg-gradient-to-br from-emerald-50/40 to-white">
+            <p className="font-bold text-emerald-800 text-sm mb-1.5 flex items-center gap-1.5">
+              <Shield size={14} className="text-emerald-600" /> {it.title}
+            </p>
+            <p className="text-xs text-gray-700 leading-relaxed">{it.how}</p>
+            <p className="text-[10px] text-gray-400 mt-2 font-mono">{it.src}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Roadmap() {
   const cols = [
-    { h: "Short term", items: ["Confirm-don't-guess triage (shipped)", "Offline Whisper voice (shipped)", "MCP + webhook integration (shipped)"] },
+    { h: "Short term", items: ["Negation-aware BM25 + low-confidence abstention (shipped)", "Offline Whisper voice (shipped)", "MCP + webhook integration (shipped)"] },
     { h: "Mid term", items: ["Fine-tuned <100MB Bangla triage model", "Pre-cached first-aid video library", "Pregnancy & vaccination trackers"] },
     { h: "Long term", items: ["CHW coordination + SMS fallback", "Multi-country protocol packs", "Real BMDC verification API integration"] },
   ];
@@ -764,7 +840,8 @@ function Roadmap() {
 
 function Changelog() {
   const log: [string, string][] = [
-    ["v2.0", "Confirm-don't-guess triage flow · triage-not-diagnose prompts · accept-corrections · /docs module"],
+    ["v2.1", "Safety hardening: negation-aware BM25 (stripNormalcyClauses) · implicit symptom enrichment (temperature → fever, age → pediatric) · chief-complaint tracking with verdict-marker reset · MIN_KB_CONFIDENCE abstention + LowConfidenceCard UI · pediatric ORS rule in TRIAGE_SYSTEM (WHO IMCI) · per-message TTS Listen button · Whisper warm-up-on-demand · continuous-mode Web Speech with multi-utterance accumulation · Gemini multi-key rotation"],
+    ["v2.0", "Triage refresh: auto-pick top BM25 candidate (no confirm picker) · severity-DESC tie-break for safety · BM25 stopword filter (BN+EN) · 'What I heard' echo + 'Likely: <condition>' label · triage-not-diagnose prompts · accept-corrections · /docs module"],
     ["v1.5", "Removed WebGPU tier · SmolLM2-360M on-device · offline Whisper STT · 82-entry KB · MCP server + n8n webhooks"],
     ["v1.0", "Offline-first PWA · tiered AI · prescription scanner · Firebase auth + sync · bilingual triage"],
   ];
